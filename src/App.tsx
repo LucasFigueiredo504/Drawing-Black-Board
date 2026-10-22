@@ -3,11 +3,14 @@ import type { CSSProperties, DragEvent, PointerEvent } from "react";
 import {
   Download,
   Eraser,
+  FileDown,
+  FileUp,
   ImageDown,
   ImagePlus,
   Maximize,
   PanelLeft,
   PanelLeftClose,
+  Pencil,
   Trash2,
   Type,
 } from "lucide-react";
@@ -99,6 +102,67 @@ const FONTS: Record<string, { label: string; css: string }> = {
 };
 const fontCss = (k?: string) => (FONTS[k ?? "sans"] ?? FONTS.sans).css;
 
+// ---- Board files (export / import) ----
+const FILE_APP = "whiteboard";
+
+async function gzipText(text: string): Promise<Blob> {
+  const stream = new Blob([text])
+    .stream()
+    .pipeThrough(new CompressionStream("gzip"));
+  return new Response(stream).blob();
+}
+
+// Reads a board file, whether it's gzip-compressed or plain JSON
+async function readBoardFile(file: File): Promise<string> {
+  const buf = await file.arrayBuffer();
+  const b = new Uint8Array(buf);
+  if (b[0] === 0x1f && b[1] === 0x8b) {
+    const stream = new Blob([buf])
+      .stream()
+      .pipeThrough(new DecompressionStream("gzip"));
+    return new Response(stream).text();
+  }
+  return new TextDecoder().decode(buf);
+}
+
+const num = (v: unknown, d: number) =>
+  typeof v === "number" && Number.isFinite(v) ? v : d;
+
+// Validate imported items and keep only known fields (with fresh ids)
+function cleanItems(raw: unknown): Item[] {
+  if (!Array.isArray(raw)) throw new Error("Invalid file");
+  const out: Item[] = [];
+  for (const r of raw) {
+    if (!r || typeof r !== "object") continue;
+    const o = r as Record<string, unknown>;
+    const base = {
+      id: crypto.randomUUID(),
+      x: num(o.x, 0),
+      y: num(o.y, 0),
+      w: Math.max(1, num(o.w, 100)),
+      h: Math.max(1, num(o.h, 100)),
+      z: num(o.z, out.length + 1),
+    };
+    if (o.type === "text") {
+      out.push({
+        ...base,
+        src: "",
+        type: "text",
+        text: typeof o.text === "string" ? o.text : "",
+        fs: num(o.fs, 24),
+        ff: typeof o.ff === "string" && o.ff in FONTS ? o.ff : undefined,
+        color:
+          typeof o.color === "string" && /^#[0-9a-f]{6}$/i.test(o.color)
+            ? o.color
+            : undefined,
+      });
+    } else if (typeof o.src === "string" && o.src.startsWith("data:image/")) {
+      out.push({ ...base, src: o.src });
+    }
+  }
+  return out;
+}
+
 const ICON = 18;
 const iconBtn: CSSProperties = {
   display: "inline-flex",
@@ -106,6 +170,12 @@ const iconBtn: CSSProperties = {
   justifyContent: "center",
   gap: 6,
   padding: "6px 9px",
+};
+
+const actBtn: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
 };
 
 const topZ = (list: Item[]) => list.reduce((m, i) => Math.max(m, i.z), 0) + 1;
@@ -150,6 +220,7 @@ export default function App() {
   } | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const importInput = useRef<HTMLInputElement>(null);
   const drag = useRef<DragState | null>(null);
   const zTop = useRef(1);
   const textRef = useRef<HTMLTextAreaElement>(null);
@@ -648,6 +719,64 @@ export default function App() {
     }
   };
 
+  // Save one board to a file (gzip-compressed when the browser supports it)
+  const exportBoard = async (id: string) => {
+    const meta = boards.find((b) => b.id === id);
+    if (!meta) return;
+    setStatus("Exportando…");
+    try {
+      const list = id === lib?.current ? items : await loadItems(id);
+      const json = JSON.stringify({
+        app: FILE_APP,
+        version: 1,
+        name: meta.name,
+        items: list,
+      });
+      const packed = typeof CompressionStream !== "undefined";
+      const blob = packed
+        ? await gzipText(json)
+        : new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${meta.name.replace(/[\\/:*?"<>|]+/g, "_")}.${packed ? "BlackBoard" : "BlackBoard.json"}`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setStatus("Quadro exportado");
+    } catch {
+      setStatus("Não foi possível exportar");
+    }
+  };
+
+  // Add a board from a file as a NEW board (never overwrites existing ones)
+  const importBoard = async (file: File) => {
+    if (!lib) return;
+    setStatus("Importando…");
+    try {
+      const data = JSON.parse(await readBoardFile(file));
+      if (!data || data.app !== FILE_APP || !Array.isArray(data.items)) {
+        throw new Error("Invalid file");
+      }
+      const list = cleanItems(data.items);
+      const name =
+        typeof data.name === "string" && data.name.trim()
+          ? data.name.trim().slice(0, 80)
+          : `Quadro ${lib.boards.length + 1}`;
+      try {
+        await saveItems(lib.current, items);
+      } catch {
+        /* keep going */
+      }
+      const id = crypto.randomUUID();
+      await saveItems(id, list);
+      showBoard(id, list);
+      persistLibrary({ boards: [...lib.boards, { id, name }], current: id });
+      setStatus("Quadro importado");
+    } catch {
+      setStatus("Arquivo inválido");
+    }
+  };
+
   const clearAll = () => {
     if (!confirmClear) {
       setConfirmClear(true);
@@ -819,9 +948,34 @@ export default function App() {
             className="side-in"
             style={{ display: "flex", flexDirection: "column" }}
           >
-            <button className="primary wide" onClick={newBoard}>
-              Novo quadro
-            </button>
+            <input
+              ref={importInput}
+              type="file"
+              accept=".BlackBoard,.json,application/json"
+              hidden
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) importBoard(f);
+                e.target.value = "";
+              }}
+            />
+            <div style={{ display: "flex", gap: 6 }}>
+              <button
+                className="primary"
+                onClick={newBoard}
+                style={{ flex: 1, minWidth: 0 }}
+              >
+                Novo quadro
+              </button>
+              <button
+                onClick={() => importInput.current?.click()}
+                title="Importar quadro"
+                aria-label="Importar quadro"
+                style={iconBtn}
+              >
+                <FileUp size={ICON} />
+              </button>
+            </div>
             <ul>
               {boards.map((b) => (
                 <li
@@ -853,9 +1007,30 @@ export default function App() {
                     </button>
                   )}
                   <span className="acts">
-                    <button onClick={() => setEditing(b.id)}>Renomear</button>
-                    <button onClick={() => deleteBoard(b.id)}>
-                      {confirmDelete === b.id ? "Certeza?" : "Excluir"}
+                    <button
+                      onClick={() => setEditing(b.id)}
+                      title="Renomear"
+                      aria-label="Renomear"
+                      style={actBtn}
+                    >
+                      <Pencil size={15} />
+                    </button>
+                    <button
+                      onClick={() => exportBoard(b.id)}
+                      title="Exportar quadro"
+                      aria-label="Exportar quadro"
+                      style={actBtn}
+                    >
+                      <FileDown size={15} />
+                    </button>
+                    <button
+                      onClick={() => deleteBoard(b.id)}
+                      title="Excluir"
+                      aria-label="Excluir"
+                      style={actBtn}
+                    >
+                      <Trash2 size={15} />
+                      {confirmDelete === b.id && "Certeza?"}
                     </button>
                   </span>
                 </li>
