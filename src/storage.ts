@@ -1,11 +1,14 @@
 export interface Item {
   id: string;
-  src: string; // data URL
+  src: string; // data URL (empty for text nodes)
   x: number;
   y: number;
   w: number;
   h: number;
   z: number;
+  type?: "image" | "text"; // undefined = image (older saves)
+  text?: string; // text nodes only
+  fs?: number; // font size in px (text nodes only)
 }
 
 export interface BoardMeta {

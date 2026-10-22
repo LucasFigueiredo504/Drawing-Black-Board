@@ -19,6 +19,7 @@ interface DragState {
   oy: number;
   ow: number;
   oh: number;
+  ofs: number;
 }
 
 const MIN_SCALE = 0.1;
@@ -38,6 +39,8 @@ export default function App() {
   const [sideOpen, setSideOpen] = useState(() => window.innerWidth > 700);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [scale, setScale] = useState(1);
+  const [textMode, setTextMode] = useState(false);
+  const [editingText, setEditingText] = useState<string | null>(null);
 
   const loaded = useRef(false);
   const activeId = useRef("");
@@ -56,6 +59,7 @@ export default function App() {
   const fileInput = useRef<HTMLInputElement>(null);
   const drag = useRef<DragState | null>(null);
   const zTop = useRef(1);
+  const textRef = useRef<HTMLTextAreaElement>(null);
 
   const boards = lib?.boards ?? [];
   const current = boards.find((b) => b.id === lib?.current);
@@ -125,6 +129,19 @@ export default function App() {
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
 
+  // Focus the text box when a text node enters edit mode
+  useEffect(() => {
+    if (!editingText) return;
+    // small delay so the click that created it doesn't steal the focus back
+    const t = setTimeout(() => {
+      const el = textRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    }, 50);
+    return () => clearTimeout(t);
+  }, [editingText]);
+
   const showBoard = (id: string, list: Item[]) => {
     activeId.current = id;
     zTop.current = topZ(list);
@@ -132,6 +149,7 @@ export default function App() {
     setSel(null);
     setPan({ x: 0, y: 0 });
     setScale(1);
+    setEditingText(null);
   };
 
   const openBoard = async (id: string) => {
@@ -253,7 +271,9 @@ export default function App() {
       if (files && files.length) addFiles(files);
     };
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).tagName === "INPUT") return;
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (e.key === "Escape") setTextMode(false);
       if (e.key === "Delete" || e.key === "Backspace") removeSelected();
     };
     window.addEventListener("paste", onPaste);
@@ -280,6 +300,11 @@ export default function App() {
     it: Item,
     mode: DragState["mode"],
   ) => {
+    // While a text node is being edited, let the textarea handle the pointer
+    if (editingText === it.id) {
+      e.stopPropagation();
+      return;
+    }
     // First click only selects; the event bubbles to the viewport so
     // dragging an unselected image pans the board instead of moving it.
     if (mode === "move" && sel !== it.id) {
@@ -300,6 +325,7 @@ export default function App() {
       oy: it.y,
       ow: it.w,
       oh: it.h,
+      ofs: it.fs ?? 24,
     };
   };
 
@@ -313,7 +339,13 @@ export default function App() {
         if (i.id !== d.id) return i;
         if (d.mode === "move") return { ...i, x: d.ox + dx, y: d.oy + dy };
         const w = Math.max(40, d.ow + dx);
-        return { ...i, w, h: Math.round((w * d.oh) / d.ow) };
+        return {
+          ...i,
+          w,
+          h: Math.round((w * d.oh) / d.ow),
+          // resizing a text node scales its font, so the wrapping stays the same
+          fs: i.type === "text" ? (d.ofs * w) / d.ow : i.fs,
+        };
       }),
     );
   };
@@ -326,6 +358,33 @@ export default function App() {
   };
 
   const startPan = (e: PointerEvent<HTMLDivElement>) => {
+    // Text tool: a click on empty canvas creates a text node and edits it
+    if (textMode && !(e.target as HTMLElement).closest(".item")) {
+      e.preventDefault();
+      const r = scroller.current!.getBoundingClientRect();
+      const id = crypto.randomUUID();
+      const fs = 24;
+      setItems((p) => [
+        ...p,
+        {
+          id,
+          src: "",
+          type: "text",
+          text: "",
+          fs,
+          x: (e.clientX - r.left - pan.x) / scale,
+          y: (e.clientY - r.top - pan.y) / scale,
+          w: 220,
+          h: Math.round(fs * 1.3),
+          z: zTop.current++,
+        },
+      ]);
+      setSel(id);
+      setEditingText(id);
+      setTextMode(false);
+      setStatus("Saving…");
+      return;
+    }
     e.currentTarget.setPointerCapture(e.pointerId);
     // Keep the selection when the press started on an image (handled above)
     if (!(e.target as HTMLElement).closest(".item")) setSel(null);
@@ -364,7 +423,42 @@ export default function App() {
           .trim() || "#fff";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.imageSmoothingQuality = "high";
+      const ink =
+        getComputedStyle(document.documentElement)
+          .getPropertyValue("--ink")
+          .trim() || "#000";
+      const wrapLines = (text: string, maxW: number) => {
+        const out: string[] = [];
+        for (const para of text.split("\n")) {
+          let line = "";
+          for (const word of para.split(" ")) {
+            const test = line ? `${line} ${word}` : word;
+            if (!line || ctx.measureText(test).width <= maxW) {
+              line = test;
+            } else {
+              out.push(line);
+              line = word;
+            }
+          }
+          out.push(line);
+        }
+        return out;
+      };
       for (const it of [...list].sort((a, b) => a.z - b.z)) {
+        if (it.type === "text") {
+          const fs = (it.fs ?? 24) * k;
+          ctx.font = `${fs}px "IBM Plex Sans", system-ui, sans-serif`;
+          ctx.fillStyle = ink;
+          ctx.textBaseline = "top";
+          wrapLines(it.text ?? "", it.w * k).forEach((ln, idx) =>
+            ctx.fillText(
+              ln,
+              (it.x - minX) * k,
+              (it.y - minY) * k + idx * fs * 1.3 + fs * 0.15,
+            ),
+          );
+          continue;
+        }
         const img = await new Promise<HTMLImageElement>((res, rej) => {
           const im = new Image();
           im.onload = () => res(im);
@@ -430,6 +524,12 @@ export default function App() {
         />
         <button className="primary" onClick={() => fileInput.current?.click()}>
           Add images
+        </button>
+        <button
+          className={textMode ? "primary" : undefined}
+          onClick={() => setTextMode((m) => !m)}
+        >
+          {textMode ? "Click on the canvas…" : "Add text"}
         </button>
         <button
           disabled={!pan.x && !pan.y && scale === 1}
@@ -535,6 +635,7 @@ export default function App() {
           style={{
             backgroundPosition: `${pan.x}px ${pan.y}px`,
             backgroundSize: `${28 * scale}px ${28 * scale}px`,
+            cursor: textMode ? "crosshair" : undefined,
           }}
           onDragOver={(e) => {
             e.preventDefault();
@@ -574,11 +675,92 @@ export default function App() {
                   height: it.h,
                   zIndex: it.z,
                 }}
+                onDoubleClick={() => {
+                  if (it.type === "text") setEditingText(it.id);
+                }}
                 onPointerDown={(e) => startDrag(e, it, "move")}
                 onPointerMove={moveDrag}
                 onPointerUp={endDrag}
               >
-                <img src={it.src} alt="" draggable={false} />
+                {it.type === "text" ? (
+                  editingText === it.id ? (
+                    <textarea
+                      ref={textRef}
+                      value={it.text ?? ""}
+                      onChange={(e) => {
+                        const ta = e.currentTarget;
+                        const value = ta.value;
+                        // measure the content height so the node grows with the text
+                        ta.style.height = "auto";
+                        const h = ta.scrollHeight;
+                        ta.style.height = "";
+                        setItems((p) =>
+                          p.map((i) =>
+                            i.id === it.id
+                              ? {
+                                  ...i,
+                                  text: value,
+                                  h: Math.max(
+                                    Math.round((i.fs ?? 24) * 1.3),
+                                    h,
+                                  ),
+                                }
+                              : i,
+                          ),
+                        );
+                        setStatus("Saving…");
+                      }}
+                      onBlur={(e) => {
+                        const empty = !e.currentTarget.value.trim();
+                        setEditingText(null);
+                        if (empty) {
+                          setItems((p) => p.filter((i) => i.id !== it.id));
+                          setSel((s) => (s === it.id ? null : s));
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Escape") e.currentTarget.blur();
+                      }}
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        height: "100%",
+                        boxSizing: "border-box",
+                        margin: 0,
+                        padding: 0,
+                        border: "none",
+                        outline: "none",
+                        resize: "none",
+                        overflow: "hidden",
+                        background: "transparent",
+                        color: "var(--ink)",
+                        font: "inherit",
+                        fontSize: it.fs ?? 24,
+                        lineHeight: 1.3,
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                        cursor: "text",
+                        userSelect: "text",
+                      }}
+                    />
+                  ) : (
+                    <div
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        color: "var(--ink)",
+                        fontSize: it.fs ?? 24,
+                        lineHeight: 1.3,
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                      }}
+                    >
+                      {it.text}
+                    </div>
+                  )
+                ) : (
+                  <img src={it.src} alt="" draggable={false} />
+                )}
                 <div
                   className="handle"
                   onPointerDown={(e) => startDrag(e, it, "resize")}
