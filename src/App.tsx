@@ -341,15 +341,15 @@ export default function App() {
   };
 
   // Render every image on the board into a single PNG and download it
-  const exportPng = async () => {
-    if (!items.length) return;
+  const exportPng = async (list: Item[], suffix = "") => {
+    if (!list.length) return;
     setStatus("Exporting…");
     try {
       const pad = 40;
-      const minX = Math.min(...items.map((i) => i.x)) - pad;
-      const minY = Math.min(...items.map((i) => i.y)) - pad;
-      const maxX = Math.max(...items.map((i) => i.x + i.w)) + pad;
-      const maxY = Math.max(...items.map((i) => i.y + i.h)) + pad;
+      const minX = Math.min(...list.map((i) => i.x)) - pad;
+      const minY = Math.min(...list.map((i) => i.y)) - pad;
+      const maxX = Math.max(...list.map((i) => i.x + i.w)) + pad;
+      const maxY = Math.max(...list.map((i) => i.y + i.h)) + pad;
       const bw = maxX - minX;
       const bh = maxY - minY;
       // 2x for sharpness, but keep the canvas within browser limits
@@ -364,7 +364,7 @@ export default function App() {
           .trim() || "#fff";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.imageSmoothingQuality = "high";
-      for (const it of [...items].sort((a, b) => a.z - b.z)) {
+      for (const it of [...list].sort((a, b) => a.z - b.z)) {
         const img = await new Promise<HTMLImageElement>((res, rej) => {
           const im = new Image();
           im.onload = () => res(im);
@@ -386,7 +386,7 @@ export default function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${(current?.name ?? "whiteboard").replace(/[\\/:*?"<>|]+/g, "_")}.png`;
+      a.download = `${(current?.name ?? "whiteboard").replace(/[\\/:*?"<>|]+/g, "_")}${suffix}.png`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       setStatus("Exported");
@@ -440,29 +440,25 @@ export default function App() {
         >
           Reset view{scale !== 1 ? ` (${Math.round(scale * 100)}%)` : ""}
         </button>
-        <button disabled={!items.length} onClick={exportPng}>
+        <button disabled={!items.length} onClick={() => exportPng(items)}>
           Export PNG
         </button>
-        <button disabled={!sel} onClick={removeSelected}>
-          Delete selected
-        </button>
+        {sel && (
+          <>
+            <button
+              onClick={() => {
+                const it = items.find((i) => i.id === sel);
+                if (it) exportPng([it], "-selected");
+              }}
+            >
+              Export selected
+            </button>
+            <button onClick={removeSelected}>Delete selected</button>
+          </>
+        )}
         <button disabled={!items.length} onClick={clearAll}>
           {confirmClear ? "Click again to clear all" : "Clear board"}
         </button>
-        <span
-          className="status"
-          style={{ marginLeft: 6, whiteSpace: "nowrap" }}
-        >
-          Developed by{" "}
-          <a
-            href="https://next-frontend-portifolio.vercel.app/"
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: "var(--accent)" }}
-          >
-            Lucas Figueiredo
-          </a>
-        </span>
       </div>
 
       <div className="main">
@@ -470,7 +466,10 @@ export default function App() {
           className={"side" + (sideOpen ? "" : " closed")}
           aria-label="Boards"
         >
-          <div className="side-in">
+          <div
+            className="side-in"
+            style={{ display: "flex", flexDirection: "column" }}
+          >
             <button className="primary wide" onClick={newBoard}>
               New board
             </button>
@@ -513,6 +512,20 @@ export default function App() {
                 </li>
               ))}
             </ul>
+            <div
+              className="status"
+              style={{ marginTop: "auto", paddingTop: 16 }}
+            >
+              Developed by{" "}
+              <a
+                href="https://next-frontend-portifolio.vercel.app/"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "var(--accent)" }}
+              >
+                Lucas Figueiredo
+              </a>
+            </div>
           </div>
         </aside>
 
