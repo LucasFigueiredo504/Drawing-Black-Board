@@ -449,6 +449,20 @@ export default function App() {
         <button disabled={!items.length} onClick={clearAll}>
           {confirmClear ? "Click again to clear all" : "Clear board"}
         </button>
+        <span
+          className="status"
+          style={{ marginLeft: 6, whiteSpace: "nowrap" }}
+        >
+          Developed by{" "}
+          <a
+            href="https://next-frontend-portifolio.vercel.app/"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "var(--accent)" }}
+          >
+            Lucas Figueiredo
+          </a>
+        </span>
       </div>
 
       <div className="main">
