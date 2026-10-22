@@ -25,6 +25,69 @@ interface DragState {
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 4;
 
+type ThemeKey = "dark" | "white" | "beige";
+
+const THEMES: Record<
+  ThemeKey,
+  { label: string; scheme: "dark" | "light"; vars: Record<string, string> }
+> = {
+  dark: {
+    label: "Escuro",
+    scheme: "dark",
+    vars: {
+      "--bg": "#141518",
+      "--board": "#1e2024",
+      "--ink": "#ecebe6",
+      "--mute": "#9a9ea8",
+      "--line": "#34363c",
+      "--dot": "#32343a",
+      "--accent": "#7aa2ff",
+      "--bar": "#1a1b1f",
+      "--hover": "#26282d",
+    },
+  },
+  white: {
+    label: "Branco",
+    scheme: "light",
+    vars: {
+      "--bg": "#f4f4f5",
+      "--board": "#ffffff",
+      "--ink": "#1b1c20",
+      "--mute": "#6b6f7a",
+      "--line": "#dcdce0",
+      "--dot": "#d6d6db",
+      "--accent": "#2f6fed",
+      "--bar": "#fafafa",
+      "--hover": "#ececef",
+    },
+  },
+  beige: {
+    label: "Bege",
+    scheme: "light",
+    vars: {
+      "--bg": "#e9e1cf",
+      "--board": "#f6f0e1",
+      "--ink": "#3a3326",
+      "--mute": "#7d7360",
+      "--line": "#d6ccb4",
+      "--dot": "#d3c8ae",
+      "--accent": "#a8571f",
+      "--bar": "#f0e9d8",
+      "--hover": "#e4dbc5",
+    },
+  },
+};
+
+// Fonts available for text nodes (loaded in the CSS @import)
+const FONTS: Record<string, { label: string; css: string }> = {
+  sans: { label: "Sans", css: '"IBM Plex Sans", system-ui, sans-serif' },
+  serif: { label: "Serifada", css: '"Playfair Display", Georgia, serif' },
+  mono: { label: "Mono", css: '"Courier New", ui-monospace, monospace' },
+  hand: { label: "Manuscrita", css: '"Caveat", cursive' },
+  display: { label: "Título", css: '"Bebas Neue", Impact, sans-serif' },
+};
+const fontCss = (k?: string) => (FONTS[k ?? "sans"] ?? FONTS.sans).css;
+
 const topZ = (list: Item[]) => list.reduce((m, i) => Math.max(m, i.z), 0) + 1;
 
 export default function App() {
@@ -32,13 +95,23 @@ export default function App() {
   const [items, setItems] = useState<Item[]>([]);
   const [sel, setSel] = useState<string | null>(null);
   const [over, setOver] = useState(false);
-  const [status, setStatus] = useState("Loading…");
+  const [status, setStatus] = useState("Carregando…");
   const [confirmClear, setConfirmClear] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [sideOpen, setSideOpen] = useState(() => window.innerWidth > 700);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [scale, setScale] = useState(1);
+  const [theme, setTheme] = useState<ThemeKey>(() => {
+    try {
+      const t = localStorage.getItem("wb-theme");
+      if (t && t in THEMES) return t as ThemeKey;
+    } catch {
+      /* ignore */
+    }
+    return "dark";
+  });
+  const [themeOpen, setThemeOpen] = useState(false);
   const [textMode, setTextMode] = useState(false);
   const [editingText, setEditingText] = useState<string | null>(null);
 
@@ -66,7 +139,7 @@ export default function App() {
 
   const persistLibrary = (next: Library) => {
     setLib(next);
-    saveLibrary(next).catch(() => setStatus("Couldn’t save"));
+    saveLibrary(next).catch(() => setStatus("Não foi possível salvar"));
   };
 
   // Load boards + the last open board once
@@ -79,12 +152,12 @@ export default function App() {
         zTop.current = topZ(saved);
         setLib(l);
         setItems(saved);
-        setStatus(saved.length ? "Board restored" : "Ready");
+        setStatus(saved.length ? "Quadro restaurado" : "Pronto");
       } catch {
         const id = crypto.randomUUID();
         activeId.current = id;
-        setLib({ boards: [{ id, name: "Board 1" }], current: id });
-        setStatus("Ready (saving unavailable)");
+        setLib({ boards: [{ id, name: "Quadro 1" }], current: id });
+        setStatus("Pronto (salvamento indisponível)");
       } finally {
         loaded.current = true;
       }
@@ -97,8 +170,8 @@ export default function App() {
     const id = activeId.current;
     const t = setTimeout(() => {
       saveItems(id, items)
-        .then(() => setStatus("Saved"))
-        .catch(() => setStatus("Couldn’t save"));
+        .then(() => setStatus("Salvo"))
+        .catch(() => setStatus("Não foi possível salvar"));
     }, 500);
     return () => clearTimeout(t);
   }, [items]);
@@ -128,6 +201,19 @@ export default function App() {
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
+
+  // Apply the chosen color theme (and remember it)
+  useEffect(() => {
+    const root = document.documentElement;
+    const t = THEMES[theme];
+    for (const [k, v] of Object.entries(t.vars)) root.style.setProperty(k, v);
+    root.style.colorScheme = t.scheme;
+    try {
+      localStorage.setItem("wb-theme", theme);
+    } catch {
+      /* ignore */
+    }
+  }, [theme]);
 
   // Focus the text box when a text node enters edit mode
   useEffect(() => {
@@ -159,9 +245,9 @@ export default function App() {
       const next = await loadItems(id);
       showBoard(id, next);
       persistLibrary({ ...lib, current: id });
-      setStatus("Board opened");
+      setStatus("Quadro aberto");
     } catch {
-      setStatus("Couldn’t open board");
+      setStatus("Não foi possível abrir o quadro");
     }
   };
 
@@ -175,7 +261,7 @@ export default function App() {
     const id = crypto.randomUUID();
     showBoard(id, []);
     persistLibrary({
-      boards: [...lib.boards, { id, name: `Board ${lib.boards.length + 1}` }],
+      boards: [...lib.boards, { id, name: `Quadro ${lib.boards.length + 1}` }],
       current: id,
     });
     setEditing(id);
@@ -218,7 +304,7 @@ export default function App() {
       showBoard(rest[0].id, next);
       persistLibrary({ boards: rest, current: rest[0].id });
     } else {
-      const fresh = { id: crypto.randomUUID(), name: "Board 1" };
+      const fresh = { id: crypto.randomUUID(), name: "Quadro 1" };
       showBoard(fresh.id, []);
       persistLibrary({ boards: [fresh], current: fresh.id });
     }
@@ -251,7 +337,7 @@ export default function App() {
       if (added.length) {
         setItems((p) => [...p, ...added]);
         setSel(added[added.length - 1].id);
-        setStatus("Saving…");
+        setStatus("Salvando…");
       }
     },
     [],
@@ -261,7 +347,7 @@ export default function App() {
     if (!sel) return;
     setItems((p) => p.filter((i) => i.id !== sel));
     setSel(null);
-    setStatus("Saving…");
+    setStatus("Salvando…");
   }, [sel]);
 
   // Paste images + Delete key
@@ -272,7 +358,7 @@ export default function App() {
     };
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       if (e.key === "Escape") setTextMode(false);
       if (e.key === "Delete" || e.key === "Backspace") removeSelected();
     };
@@ -353,7 +439,7 @@ export default function App() {
   const endDrag = () => {
     if (drag.current) {
       drag.current = null;
-      setStatus("Saving…");
+      setStatus("Salvando…");
     }
   };
 
@@ -382,7 +468,7 @@ export default function App() {
       setSel(id);
       setEditingText(id);
       setTextMode(false);
-      setStatus("Saving…");
+      setStatus("Salvando…");
       return;
     }
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -399,10 +485,50 @@ export default function App() {
     panDrag.current = null;
   };
 
+  // ---- Text styling (font + color) ----
+  const selItem = items.find((i) => i.id === sel);
+  const selIsText = selItem?.type === "text";
+
+  // Recompute the text height after a font change (the wrapping changes)
+  const remeasure = (id: string, ff?: string) => {
+    const run = async () => {
+      try {
+        await document.fonts.load(`24px ${fontCss(ff)}`);
+      } catch {
+        /* ignore */
+      }
+      requestAnimationFrame(() => {
+        const el = document.querySelector<HTMLElement>(
+          `[data-id="${id}"] > div:first-child, [data-id="${id}"] > textarea`,
+        );
+        if (!el) return;
+        const prev = el.style.height;
+        el.style.height = "auto";
+        const h = el.scrollHeight;
+        el.style.height = prev;
+        setItems((p) =>
+          p.map((i) =>
+            i.id === id
+              ? { ...i, h: Math.max(Math.round((i.fs ?? 24) * 1.3), h) }
+              : i,
+          ),
+        );
+      });
+    };
+    run();
+  };
+
+  const updateSelected = (patch: Partial<Item>) => {
+    if (!sel) return;
+    setItems((p) => p.map((i) => (i.id === sel ? { ...i, ...patch } : i)));
+    setStatus("Salvando…");
+    if ("ff" in patch) remeasure(sel, patch.ff);
+  };
+
   // Render every image on the board into a single PNG and download it
   const exportPng = async (list: Item[], suffix = "") => {
     if (!list.length) return;
-    setStatus("Exporting…");
+    setStatus("Exportando…");
     try {
       const pad = 40;
       const minX = Math.min(...list.map((i) => i.x)) - pad;
@@ -447,8 +573,14 @@ export default function App() {
       for (const it of [...list].sort((a, b) => a.z - b.z)) {
         if (it.type === "text") {
           const fs = (it.fs ?? 24) * k;
-          ctx.font = `${fs}px "IBM Plex Sans", system-ui, sans-serif`;
-          ctx.fillStyle = ink;
+          const fam = fontCss(it.ff);
+          try {
+            await document.fonts.load(`${fs}px ${fam}`);
+          } catch {
+            /* ignore */
+          }
+          ctx.font = `${fs}px ${fam}`;
+          ctx.fillStyle = it.color ?? ink;
           ctx.textBaseline = "top";
           wrapLines(it.text ?? "", it.w * k).forEach((ln, idx) =>
             ctx.fillText(
@@ -480,12 +612,12 @@ export default function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${(current?.name ?? "whiteboard").replace(/[\\/:*?"<>|]+/g, "_")}${suffix}.png`;
+      a.download = `${(current?.name ?? "quadro").replace(/[\\/:*?"<>|]+/g, "_")}${suffix}.png`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setStatus("Exported");
+      setStatus("Exportado");
     } catch {
-      setStatus("Couldn’t export");
+      setStatus("Não foi possível exportar");
     }
   };
 
@@ -498,16 +630,16 @@ export default function App() {
     setItems([]);
     setSel(null);
     setConfirmClear(false);
-    setStatus("Saving…");
+    setStatus("Salvando…");
   };
 
   return (
     <>
       <div className="bar">
         <button onClick={() => setSideOpen((o) => !o)} aria-expanded={sideOpen}>
-          {sideOpen ? "Hide boards" : "Boards"}
+          {sideOpen ? "Ocultar quadros" : "Quadros"}
         </button>
-        <h1>{current?.name ?? "Whiteboard"}</h1>
+        <h1>{current?.name ?? "Quadro"}</h1>
         <span className="status" role="status">
           {status}
         </span>
@@ -523,14 +655,56 @@ export default function App() {
           }}
         />
         <button className="primary" onClick={() => fileInput.current?.click()}>
-          Add images
+          Adicionar imagens
         </button>
         <button
           className={textMode ? "primary" : undefined}
           onClick={() => setTextMode((m) => !m)}
         >
-          {textMode ? "Click on the canvas…" : "Add text"}
+          {textMode ? "Clique no canvas…" : "Adicionar texto"}
         </button>
+        {selIsText && (
+          <>
+            <select
+              aria-label="Fonte do texto"
+              value={selItem?.ff ?? "sans"}
+              onChange={(e) => updateSelected({ ff: e.target.value })}
+              style={{
+                font: "inherit",
+                color: "var(--ink)",
+                background: "var(--board)",
+                border: "1px solid var(--line)",
+                borderRadius: 6,
+                padding: "6px 8px",
+              }}
+            >
+              {Object.entries(FONTS).map(([k, f]) => (
+                <option key={k} value={k}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+            <input
+              type="color"
+              aria-label="Cor do texto"
+              title="Cor do texto"
+              value={
+                selItem?.color ??
+                (getComputedStyle(document.documentElement)
+                  .getPropertyValue("--ink")
+                  .trim() ||
+                  "#000000")
+              }
+              onChange={(e) => updateSelected({ color: e.target.value })}
+              style={{ width: 36, height: 32, padding: 2, cursor: "pointer" }}
+            />
+            {selItem?.color && (
+              <button onClick={() => updateSelected({ color: undefined })}>
+                Cor do tema
+              </button>
+            )}
+          </>
+        )}
         <button
           disabled={!pan.x && !pan.y && scale === 1}
           onClick={() => {
@@ -538,40 +712,40 @@ export default function App() {
             setScale(1);
           }}
         >
-          Reset view{scale !== 1 ? ` (${Math.round(scale * 100)}%)` : ""}
+          Redefinir visão{scale !== 1 ? ` (${Math.round(scale * 100)}%)` : ""}
         </button>
         <button disabled={!items.length} onClick={() => exportPng(items)}>
-          Export PNG
+          Exportar PNG
         </button>
         {sel && (
           <>
             <button
               onClick={() => {
                 const it = items.find((i) => i.id === sel);
-                if (it) exportPng([it], "-selected");
+                if (it) exportPng([it], "-selecionado");
               }}
             >
-              Export selected
+              Exportar selecionado
             </button>
-            <button onClick={removeSelected}>Delete selected</button>
+            <button onClick={removeSelected}>Excluir selecionado</button>
           </>
         )}
         <button disabled={!items.length} onClick={clearAll}>
-          {confirmClear ? "Click again to clear all" : "Clear board"}
+          {confirmClear ? "Clique de novo para limpar tudo" : "Limpar quadro"}
         </button>
       </div>
 
       <div className="main">
         <aside
           className={"side" + (sideOpen ? "" : " closed")}
-          aria-label="Boards"
+          aria-label="Quadros"
         >
           <div
             className="side-in"
             style={{ display: "flex", flexDirection: "column" }}
           >
             <button className="primary wide" onClick={newBoard}>
-              New board
+              Novo quadro
             </button>
             <ul>
               {boards.map((b) => (
@@ -604,9 +778,9 @@ export default function App() {
                     </button>
                   )}
                   <span className="acts">
-                    <button onClick={() => setEditing(b.id)}>Rename</button>
+                    <button onClick={() => setEditing(b.id)}>Renomear</button>
                     <button onClick={() => deleteBoard(b.id)}>
-                      {confirmDelete === b.id ? "Sure?" : "Delete"}
+                      {confirmDelete === b.id ? "Certeza?" : "Excluir"}
                     </button>
                   </span>
                 </li>
@@ -616,7 +790,7 @@ export default function App() {
               className="status"
               style={{ marginTop: "auto", paddingTop: 16 }}
             >
-              Developed by{" "}
+              Desenvolvido por{" "}
               <a
                 href="https://next-frontend-portifolio.vercel.app/"
                 target="_blank"
@@ -650,10 +824,10 @@ export default function App() {
           {!items.length && (
             <div className="empty">
               <div>
-                <b>Drop images here</b>
-                Drag files from your computer, paste from the clipboard, or use
-                Add images. Drag the background to move around and use the mouse
-                wheel to zoom.
+                <b>Solte imagens aqui</b>
+                Arraste arquivos do seu computador, cole da área de
+                transferência ou use Adicionar imagens. Arraste o fundo para se
+                mover e use a roda do mouse para dar zoom.
               </div>
             </div>
           )}
@@ -667,6 +841,7 @@ export default function App() {
             {items.map((it) => (
               <div
                 key={it.id}
+                data-id={it.id}
                 className={"item" + (sel === it.id ? " sel" : "")}
                 style={{
                   left: it.x,
@@ -708,7 +883,7 @@ export default function App() {
                               : i,
                           ),
                         );
-                        setStatus("Saving…");
+                        setStatus("Salvando…");
                       }}
                       onBlur={(e) => {
                         const empty = !e.currentTarget.value.trim();
@@ -733,8 +908,8 @@ export default function App() {
                         resize: "none",
                         overflow: "hidden",
                         background: "transparent",
-                        color: "var(--ink)",
-                        font: "inherit",
+                        color: it.color ?? "var(--ink)",
+                        fontFamily: fontCss(it.ff),
                         fontSize: it.fs ?? 24,
                         lineHeight: 1.3,
                         whiteSpace: "pre-wrap",
@@ -748,7 +923,8 @@ export default function App() {
                       style={{
                         width: "100%",
                         height: "100%",
-                        color: "var(--ink)",
+                        color: it.color ?? "var(--ink)",
+                        fontFamily: fontCss(it.ff),
                         fontSize: it.fs ?? 24,
                         lineHeight: 1.3,
                         whiteSpace: "pre-wrap",
@@ -771,6 +947,80 @@ export default function App() {
             ))}
           </div>
         </div>
+      </div>
+
+      {themeOpen && (
+        <div
+          onClick={() => setThemeOpen(false)}
+          style={{ position: "fixed", inset: 0, zIndex: 49 }}
+        />
+      )}
+      <div
+        style={{
+          position: "fixed",
+          right: 16,
+          bottom: 16,
+          zIndex: 50,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 8,
+        }}
+      >
+        {themeOpen && (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+              padding: 8,
+              background: "var(--bar)",
+              border: "1px solid var(--line)",
+              borderRadius: 999,
+              boxShadow: "0 4px 14px rgba(0,0,0,0.25)",
+            }}
+          >
+            {(Object.keys(THEMES) as ThemeKey[]).map((k) => (
+              <button
+                key={k}
+                title={THEMES[k].label}
+                aria-label={`Tema ${THEMES[k].label}`}
+                aria-pressed={theme === k}
+                onClick={() => {
+                  setTheme(k);
+                  setThemeOpen(false);
+                }}
+                style={{
+                  width: 28,
+                  height: 28,
+                  padding: 0,
+                  borderRadius: "50%",
+                  background: `linear-gradient(135deg, ${THEMES[k].vars["--board"]} 50%, ${THEMES[k].vars["--accent"]} 50%)`,
+                  border:
+                    theme === k
+                      ? "2px solid var(--accent)"
+                      : "2px solid var(--line)",
+                }}
+              />
+            ))}
+          </div>
+        )}
+        <button
+          title="Mudar tema"
+          aria-label="Mudar tema"
+          aria-expanded={themeOpen}
+          onClick={() => setThemeOpen((o) => !o)}
+          style={{
+            width: 40,
+            height: 40,
+            padding: 0,
+            borderRadius: "50%",
+            background:
+              "linear-gradient(135deg, var(--board) 50%, var(--accent) 50%)",
+            border: "2px solid var(--accent)",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+          }}
+        />
       </div>
     </>
   );

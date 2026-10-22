@@ -9,6 +9,8 @@ export interface Item {
   type?: "image" | "text"; // undefined = image (older saves)
   text?: string; // text nodes only
   fs?: number; // font size in px (text nodes only)
+  ff?: string; // font family key (text nodes only)
+  color?: string; // text color, hex (text nodes only); undefined = theme ink
 }
 
 export interface BoardMeta {
@@ -64,7 +66,7 @@ export async function loadLibrary(): Promise<Library> {
   const lib = await kvGet<Library>("library");
   if (lib && lib.boards.length) return lib;
   const id = crypto.randomUUID();
-  const fresh: Library = { boards: [{ id, name: "Board 1" }], current: id };
+  const fresh: Library = { boards: [{ id, name: "Quadro 1" }], current: id };
   const legacy = await kvGet<Item[]>("board");
   if (legacy && legacy.length) await kvSet(`board:${id}`, legacy);
   await kvSet("library", fresh);
