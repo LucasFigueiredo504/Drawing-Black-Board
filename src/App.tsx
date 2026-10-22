@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DragEvent, PointerEvent } from "react";
+import type { CSSProperties, DragEvent, PointerEvent } from "react";
+import {
+  Download,
+  Eraser,
+  ImageDown,
+  ImagePlus,
+  Maximize,
+  PanelLeft,
+  PanelLeftClose,
+  Trash2,
+  Type,
+} from "lucide-react";
 import {
   loadLibrary,
   saveLibrary,
@@ -87,6 +98,15 @@ const FONTS: Record<string, { label: string; css: string }> = {
   display: { label: "Título", css: '"Bebas Neue", Impact, sans-serif' },
 };
 const fontCss = (k?: string) => (FONTS[k ?? "sans"] ?? FONTS.sans).css;
+
+const ICON = 18;
+const iconBtn: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 6,
+  padding: "6px 9px",
+};
 
 const topZ = (list: Item[]) => list.reduce((m, i) => Math.max(m, i.z), 0) + 1;
 
@@ -391,12 +411,9 @@ export default function App() {
       e.stopPropagation();
       return;
     }
-    // First click only selects; the event bubbles to the viewport so
-    // dragging an unselected image pans the board instead of moving it.
-    if (mode === "move" && sel !== it.id) {
-      setSel(it.id);
-      return;
-    }
+    // Only the left button selects/moves/resizes; other buttons
+    // (middle = pan) bubble up to the viewport
+    if (e.button !== 0) return;
     e.stopPropagation();
     e.currentTarget.setPointerCapture(e.pointerId);
     setSel(it.id);
@@ -445,7 +462,11 @@ export default function App() {
 
   const startPan = (e: PointerEvent<HTMLDivElement>) => {
     // Text tool: a click on empty canvas creates a text node and edits it
-    if (textMode && !(e.target as HTMLElement).closest(".item")) {
+    if (
+      textMode &&
+      e.button === 0 &&
+      !(e.target as HTMLElement).closest(".item")
+    ) {
       e.preventDefault();
       const r = scroller.current!.getBoundingClientRect();
       const id = crypto.randomUUID();
@@ -471,9 +492,15 @@ export default function App() {
       setStatus("Salvando…");
       return;
     }
+    const onItem = !!(e.target as HTMLElement).closest(".item");
+    // Left click on empty canvas only deselects
+    if (!onItem && e.button === 0) setSel(null);
+    // Pan only with the middle button (mouse wheel pressed); touch can still
+    // pan by dragging the empty canvas since it has no middle button
+    const canPan = e.button === 1 || (e.pointerType === "touch" && !onItem);
+    if (!canPan) return;
+    e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
-    // Keep the selection when the press started on an image (handled above)
-    if (!(e.target as HTMLElement).closest(".item")) setSel(null);
     panDrag.current = { sx: e.clientX, sy: e.clientY, ox: pan.x, oy: pan.y };
   };
   const movePan = (e: PointerEvent<HTMLDivElement>) => {
@@ -636,8 +663,18 @@ export default function App() {
   return (
     <>
       <div className="bar">
-        <button onClick={() => setSideOpen((o) => !o)} aria-expanded={sideOpen}>
-          {sideOpen ? "Ocultar quadros" : "Quadros"}
+        <button
+          onClick={() => setSideOpen((o) => !o)}
+          aria-expanded={sideOpen}
+          title={sideOpen ? "Ocultar quadros" : "Mostrar quadros"}
+          aria-label={sideOpen ? "Ocultar quadros" : "Mostrar quadros"}
+          style={iconBtn}
+        >
+          {sideOpen ? (
+            <PanelLeftClose size={ICON} />
+          ) : (
+            <PanelLeft size={ICON} />
+          )}
         </button>
         <h1>{current?.name ?? "Quadro"}</h1>
         <span className="status" role="status">
@@ -654,14 +691,25 @@ export default function App() {
             e.target.value = "";
           }}
         />
-        <button className="primary" onClick={() => fileInput.current?.click()}>
-          Adicionar imagens
+        <button
+          className="primary"
+          onClick={() => fileInput.current?.click()}
+          title="Adicionar imagens"
+          aria-label="Adicionar imagens"
+          style={iconBtn}
+        >
+          <ImagePlus size={ICON} />
         </button>
         <button
           className={textMode ? "primary" : undefined}
           onClick={() => setTextMode((m) => !m)}
+          title="Adicionar texto"
+          aria-label="Adicionar texto"
+          aria-pressed={textMode}
+          style={iconBtn}
         >
-          {textMode ? "Clique no canvas…" : "Adicionar texto"}
+          <Type size={ICON} />
+          {textMode && "Clique no canvas…"}
         </button>
         {selIsText && (
           <>
@@ -711,11 +759,21 @@ export default function App() {
             setPan({ x: 0, y: 0 });
             setScale(1);
           }}
+          title="Redefinir visão"
+          aria-label="Redefinir visão"
+          style={iconBtn}
         >
-          Redefinir visão{scale !== 1 ? ` (${Math.round(scale * 100)}%)` : ""}
+          <Maximize size={ICON} />
+          {scale !== 1 && `${Math.round(scale * 100)}%`}
         </button>
-        <button disabled={!items.length} onClick={() => exportPng(items)}>
-          Exportar PNG
+        <button
+          disabled={!items.length}
+          onClick={() => exportPng(items)}
+          title="Exportar PNG"
+          aria-label="Exportar PNG"
+          style={iconBtn}
+        >
+          <Download size={ICON} />
         </button>
         {sel && (
           <>
@@ -724,14 +782,31 @@ export default function App() {
                 const it = items.find((i) => i.id === sel);
                 if (it) exportPng([it], "-selecionado");
               }}
+              title="Exportar selecionado"
+              aria-label="Exportar selecionado"
+              style={iconBtn}
             >
-              Exportar selecionado
+              <ImageDown size={ICON} />
             </button>
-            <button onClick={removeSelected}>Excluir selecionado</button>
+            <button
+              onClick={removeSelected}
+              title="Excluir selecionado"
+              aria-label="Excluir selecionado"
+              style={iconBtn}
+            >
+              <Trash2 size={ICON} />
+            </button>
           </>
         )}
-        <button disabled={!items.length} onClick={clearAll}>
-          {confirmClear ? "Clique de novo para limpar tudo" : "Limpar quadro"}
+        <button
+          disabled={!items.length}
+          onClick={clearAll}
+          title="Limpar quadro"
+          aria-label="Limpar quadro"
+          style={iconBtn}
+        >
+          <Eraser size={ICON} />
+          {confirmClear && "Clique de novo para limpar tudo"}
         </button>
       </div>
 
@@ -809,7 +884,7 @@ export default function App() {
           style={{
             backgroundPosition: `${pan.x}px ${pan.y}px`,
             backgroundSize: `${28 * scale}px ${28 * scale}px`,
-            cursor: textMode ? "crosshair" : undefined,
+            cursor: textMode ? "crosshair" : "default",
           }}
           onDragOver={(e) => {
             e.preventDefault();
@@ -817,6 +892,10 @@ export default function App() {
           }}
           onDragLeave={() => setOver(false)}
           onDrop={onDrop}
+          onMouseDown={(e) => {
+            // avoid the browser's middle-click autoscroll
+            if (e.button === 1) e.preventDefault();
+          }}
           onPointerDown={startPan}
           onPointerMove={movePan}
           onPointerUp={endPan}
@@ -826,8 +905,9 @@ export default function App() {
               <div>
                 <b>Solte imagens aqui</b>
                 Arraste arquivos do seu computador, cole da área de
-                transferência ou use Adicionar imagens. Arraste o fundo para se
-                mover e use a roda do mouse para dar zoom.
+                transferência ou use Adicionar imagens. Segure a roda do mouse
+                (botão do meio) e arraste para se mover; gire a roda para dar
+                zoom.
               </div>
             </div>
           )}
