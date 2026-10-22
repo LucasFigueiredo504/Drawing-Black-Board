@@ -21,6 +21,9 @@ interface DragState {
   oh: number;
 }
 
+const MIN_SCALE = 0.1;
+const MAX_SCALE = 4;
+
 const topZ = (list: Item[]) => list.reduce((m, i) => Math.max(m, i.z), 0) + 1;
 
 export default function App() {
@@ -34,12 +37,15 @@ export default function App() {
   const [editing, setEditing] = useState<string | null>(null);
   const [sideOpen, setSideOpen] = useState(() => window.innerWidth > 700);
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [scale, setScale] = useState(1);
 
   const loaded = useRef(false);
   const activeId = useRef("");
   const skipRename = useRef(false);
   const panRef = useRef(pan);
   panRef.current = pan;
+  const scaleRef = useRef(scale);
+  scaleRef.current = scale;
   const panDrag = useRef<{
     sx: number;
     sy: number;
@@ -93,12 +99,39 @@ export default function App() {
     return () => clearTimeout(t);
   }, [items]);
 
+  // Mouse wheel = zoom in/out around the cursor
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault(); // also blocks browser zoom on Ctrl+wheel / pinch
+      const r = el.getBoundingClientRect();
+      const mx = e.clientX - r.left;
+      const my = e.clientY - r.top;
+      const s = scaleRef.current;
+      const p = panRef.current;
+      const next = Math.min(
+        MAX_SCALE,
+        Math.max(MIN_SCALE, s * Math.exp(-e.deltaY * 0.0015)),
+      );
+      const k = next / s;
+      // update refs immediately so rapid wheel events don't use stale values
+      scaleRef.current = next;
+      panRef.current = { x: mx - (mx - p.x) * k, y: my - (my - p.y) * k };
+      setScale(next);
+      setPan(panRef.current);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
   const showBoard = (id: string, list: Item[]) => {
     activeId.current = id;
     zTop.current = topZ(list);
     setItems(list);
     setSel(null);
     setPan({ x: 0, y: 0 });
+    setScale(1);
   };
 
   const openBoard = async (id: string) => {
@@ -177,8 +210,8 @@ export default function App() {
     async (files: FileList | File[], cx?: number, cy?: number) => {
       const imgs = Array.from(files).filter((f) => f.type.startsWith("image/"));
       if (!imgs.length) return;
-      const baseX = cx ?? 80 - panRef.current.x;
-      const baseY = cy ?? 80 - panRef.current.y;
+      const baseX = cx ?? (80 - panRef.current.x) / scaleRef.current;
+      const baseY = cy ?? (80 - panRef.current.y) / scaleRef.current;
       const added: Item[] = [];
       for (let i = 0; i < imgs.length; i++) {
         try {
@@ -237,8 +270,8 @@ export default function App() {
     const r = scroller.current!.getBoundingClientRect();
     addFiles(
       e.dataTransfer.files,
-      e.clientX - r.left - pan.x,
-      e.clientY - r.top - pan.y,
+      (e.clientX - r.left - pan.x) / scale,
+      (e.clientY - r.top - pan.y) / scale,
     );
   };
 
@@ -247,6 +280,12 @@ export default function App() {
     it: Item,
     mode: DragState["mode"],
   ) => {
+    // First click only selects; the event bubbles to the viewport so
+    // dragging an unselected image pans the board instead of moving it.
+    if (mode === "move" && sel !== it.id) {
+      setSel(it.id);
+      return;
+    }
     e.stopPropagation();
     e.currentTarget.setPointerCapture(e.pointerId);
     setSel(it.id);
@@ -267,8 +306,8 @@ export default function App() {
   const moveDrag = (e: PointerEvent<HTMLDivElement>) => {
     const d = drag.current;
     if (!d) return;
-    const dx = e.clientX - d.sx;
-    const dy = e.clientY - d.sy;
+    const dx = (e.clientX - d.sx) / scale;
+    const dy = (e.clientY - d.sy) / scale;
     setItems((p) =>
       p.map((i) => {
         if (i.id !== d.id) return i;
@@ -288,7 +327,8 @@ export default function App() {
 
   const startPan = (e: PointerEvent<HTMLDivElement>) => {
     e.currentTarget.setPointerCapture(e.pointerId);
-    setSel(null);
+    // Keep the selection when the press started on an image (handled above)
+    if (!(e.target as HTMLElement).closest(".item")) setSel(null);
     panDrag.current = { sx: e.clientX, sy: e.clientY, ox: pan.x, oy: pan.y };
   };
   const movePan = (e: PointerEvent<HTMLDivElement>) => {
@@ -298,6 +338,61 @@ export default function App() {
   };
   const endPan = () => {
     panDrag.current = null;
+  };
+
+  // Render every image on the board into a single PNG and download it
+  const exportPng = async () => {
+    if (!items.length) return;
+    setStatus("Exporting…");
+    try {
+      const pad = 40;
+      const minX = Math.min(...items.map((i) => i.x)) - pad;
+      const minY = Math.min(...items.map((i) => i.y)) - pad;
+      const maxX = Math.max(...items.map((i) => i.x + i.w)) + pad;
+      const maxY = Math.max(...items.map((i) => i.y + i.h)) + pad;
+      const bw = maxX - minX;
+      const bh = maxY - minY;
+      // 2x for sharpness, but keep the canvas within browser limits
+      const k = Math.min(2, 8192 / Math.max(bw, bh));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bw * k));
+      canvas.height = Math.max(1, Math.round(bh * k));
+      const ctx = canvas.getContext("2d")!;
+      ctx.fillStyle =
+        getComputedStyle(document.documentElement)
+          .getPropertyValue("--board")
+          .trim() || "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.imageSmoothingQuality = "high";
+      for (const it of [...items].sort((a, b) => a.z - b.z)) {
+        const img = await new Promise<HTMLImageElement>((res, rej) => {
+          const im = new Image();
+          im.onload = () => res(im);
+          im.onerror = () => rej(new Error("Bad image"));
+          im.src = it.src;
+        });
+        ctx.drawImage(
+          img,
+          (it.x - minX) * k,
+          (it.y - minY) * k,
+          it.w * k,
+          it.h * k,
+        );
+      }
+      const blob = await new Promise<Blob | null>((res) =>
+        canvas.toBlob(res, "image/png"),
+      );
+      if (!blob) throw new Error("Export failed");
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${(current?.name ?? "whiteboard").replace(/[\\/:*?"<>|]+/g, "_")}.png`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setStatus("Exported");
+    } catch {
+      setStatus("Couldn’t export");
+    }
   };
 
   const clearAll = () => {
@@ -337,10 +432,16 @@ export default function App() {
           Add images
         </button>
         <button
-          disabled={!pan.x && !pan.y}
-          onClick={() => setPan({ x: 0, y: 0 })}
+          disabled={!pan.x && !pan.y && scale === 1}
+          onClick={() => {
+            setPan({ x: 0, y: 0 });
+            setScale(1);
+          }}
         >
-          Reset view
+          Reset view{scale !== 1 ? ` (${Math.round(scale * 100)}%)` : ""}
+        </button>
+        <button disabled={!items.length} onClick={exportPng}>
+          Export PNG
         </button>
         <button disabled={!sel} onClick={removeSelected}>
           Delete selected
@@ -404,7 +505,10 @@ export default function App() {
         <div
           ref={scroller}
           className={"viewport" + (over ? " over" : "")}
-          style={{ backgroundPosition: `${pan.x}px ${pan.y}px` }}
+          style={{
+            backgroundPosition: `${pan.x}px ${pan.y}px`,
+            backgroundSize: `${28 * scale}px ${28 * scale}px`,
+          }}
           onDragOver={(e) => {
             e.preventDefault();
             setOver(true);
@@ -414,22 +518,23 @@ export default function App() {
           onPointerDown={startPan}
           onPointerMove={movePan}
           onPointerUp={endPan}
-          onWheel={(e) =>
-            setPan((p) => ({ x: p.x - e.deltaX, y: p.y - e.deltaY }))
-          }
         >
           {!items.length && (
             <div className="empty">
               <div>
                 <b>Drop images here</b>
                 Drag files from your computer, paste from the clipboard, or use
-                Add images. Drag the background to move around.
+                Add images. Drag the background to move around and use the mouse
+                wheel to zoom.
               </div>
             </div>
           )}
           <div
             className="board"
-            style={{ transform: `translate(${pan.x}px, ${pan.y}px)` }}
+            style={{
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
+              transformOrigin: "0 0",
+            }}
           >
             {items.map((it) => (
               <div
