@@ -1,16 +1,16 @@
 export interface Item {
   id: string;
-  src: string; // data URL (empty for text nodes)
+  src: string; // data URL (empty for text and group nodes)
   x: number;
   y: number;
   w: number;
   h: number;
   z: number;
-  type?: "image" | "text"; // undefined = image (older saves)
-  text?: string; // text nodes only
+  type?: "image" | "text" | "group"; // undefined = image (older saves)
+  text?: string; // text nodes: the content | group nodes: the title
   fs?: number; // font size in px (text nodes only)
   ff?: string; // font family key (text nodes only)
-  color?: string; // text color, hex (text nodes only); undefined = theme ink
+  color?: string; // text nodes: text color | groups: frame color (hex); undefined = theme
 }
 
 export interface BoardMeta {

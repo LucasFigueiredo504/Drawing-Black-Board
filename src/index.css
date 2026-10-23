@@ -134,11 +134,35 @@ button.primary {
   gap: 2px;
 }
 .row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
   border-radius: 6px;
   padding-right: 2px;
+}
+.row[draggable="true"] {
+  cursor: grab;
+}
+.row.dragging {
+  opacity: 0.4;
+}
+.row.drop-before::before,
+.row.drop-after::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.row.drop-before::before {
+  top: -2px;
+}
+.row.drop-after::after {
+  bottom: -2px;
 }
 .row:hover {
   background: var(--hover);

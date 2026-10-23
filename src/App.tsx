@@ -5,6 +5,7 @@ import {
   Eraser,
   FileDown,
   FileUp,
+  Frame,
   ImageDown,
   ImagePlus,
   Maximize,
@@ -34,6 +35,15 @@ interface DragState {
   ow: number;
   oh: number;
   ofs: number;
+  // when moving a group: starting positions of the items inside it
+  members?: Record<string, { x: number; y: number }>;
+}
+
+interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 const MIN_SCALE = 0.1;
@@ -102,6 +112,23 @@ const FONTS: Record<string, { label: string; css: string }> = {
 };
 const fontCss = (k?: string) => (FONTS[k ?? "sans"] ?? FONTS.sans).css;
 
+const themeVar = (name: string) =>
+  getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+// Items that sit completely inside a group's frame (they move with it)
+const membersOf = (g: Item, list: Item[]) =>
+  list.filter(
+    (i) =>
+      i.id !== g.id &&
+      i.x >= g.x - 1 &&
+      i.y >= g.y - 1 &&
+      i.x + i.w <= g.x + g.w + 1 &&
+      i.y + i.h <= g.y + g.h + 1,
+  );
+
+const MIN_GROUP_W = 80;
+const MIN_GROUP_H = 60;
+
 // ---- Board files (export / import) ----
 const FILE_APP = "whiteboard";
 
@@ -128,6 +155,9 @@ async function readBoardFile(file: File): Promise<string> {
 const num = (v: unknown, d: number) =>
   typeof v === "number" && Number.isFinite(v) ? v : d;
 
+const hexOrUndef = (v: unknown) =>
+  typeof v === "string" && /^#[0-9a-f]{6}$/i.test(v) ? v : undefined;
+
 // Validate imported items and keep only known fields (with fresh ids)
 function cleanItems(raw: unknown): Item[] {
   if (!Array.isArray(raw)) throw new Error("Invalid file");
@@ -151,10 +181,16 @@ function cleanItems(raw: unknown): Item[] {
         text: typeof o.text === "string" ? o.text : "",
         fs: num(o.fs, 24),
         ff: typeof o.ff === "string" && o.ff in FONTS ? o.ff : undefined,
-        color:
-          typeof o.color === "string" && /^#[0-9a-f]{6}$/i.test(o.color)
-            ? o.color
-            : undefined,
+        color: hexOrUndef(o.color),
+      });
+    } else if (o.type === "group") {
+      out.push({
+        ...base,
+        z: 0,
+        src: "",
+        type: "group",
+        text: typeof o.text === "string" ? o.text.slice(0, 120) : "",
+        color: hexOrUndef(o.color),
       });
     } else if (typeof o.src === "string" && o.src.startsWith("data:image/")) {
       out.push({ ...base, src: o.src });
@@ -204,6 +240,15 @@ export default function App() {
   const [themeOpen, setThemeOpen] = useState(false);
   const [textMode, setTextMode] = useState(false);
   const [editingText, setEditingText] = useState<string | null>(null);
+  const [groupMode, setGroupMode] = useState(false);
+  const [editingGroup, setEditingGroup] = useState<string | null>(null);
+  const [draw, setDraw] = useState<Rect | null>(null);
+  // Board list reordering (drag & drop in the side menu)
+  const [dragBoard, setDragBoard] = useState<string | null>(null);
+  const [dropMark, setDropMark] = useState<{
+    id: string;
+    after: boolean;
+  } | null>(null);
 
   const loaded = useRef(false);
   const activeId = useRef("");
@@ -218,12 +263,15 @@ export default function App() {
     ox: number;
     oy: number;
   } | null>(null);
+  const drawStart = useRef<{ x: number; y: number } | null>(null);
+  const drawRect = useRef<Rect | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const importInput = useRef<HTMLInputElement>(null);
   const drag = useRef<DragState | null>(null);
   const zTop = useRef(1);
   const textRef = useRef<HTMLTextAreaElement>(null);
+  const groupRef = useRef<HTMLInputElement>(null);
 
   const boards = lib?.boards ?? [];
   const current = boards.find((b) => b.id === lib?.current);
@@ -319,6 +367,18 @@ export default function App() {
     return () => clearTimeout(t);
   }, [editingText]);
 
+  // Focus the title input when a group enters title edit mode
+  useEffect(() => {
+    if (!editingGroup) return;
+    const t = setTimeout(() => {
+      const el = groupRef.current;
+      if (!el) return;
+      el.focus();
+      el.select();
+    }, 50);
+    return () => clearTimeout(t);
+  }, [editingGroup]);
+
   const showBoard = (id: string, list: Item[]) => {
     activeId.current = id;
     zTop.current = topZ(list);
@@ -327,6 +387,11 @@ export default function App() {
     setPan({ x: 0, y: 0 });
     setScale(1);
     setEditingText(null);
+    setEditingGroup(null);
+    setGroupMode(false);
+    setDraw(null);
+    drawStart.current = null;
+    drawRect.current = null;
   };
 
   const openBoard = async (id: string) => {
@@ -401,6 +466,24 @@ export default function App() {
     }
   };
 
+  // Move a board before/after another one in the side list (saved with the library)
+  const reorderBoards = (fromId: string, toId: string, after: boolean) => {
+    if (!lib || fromId === toId) return;
+    const moved = lib.boards.find((b) => b.id === fromId);
+    if (!moved) return;
+    const list = lib.boards.filter((b) => b.id !== fromId);
+    let idx = list.findIndex((b) => b.id === toId);
+    if (idx < 0) return;
+    if (after) idx++;
+    list.splice(idx, 0, moved);
+    persistLibrary({ ...lib, boards: list });
+  };
+
+  const endBoardDrag = () => {
+    setDragBoard(null);
+    setDropMark(null);
+  };
+
   const addFiles = useCallback(
     async (files: FileList | File[], cx?: number, cy?: number) => {
       const imgs = Array.from(files).filter((f) => f.type.startsWith("image/"));
@@ -450,7 +533,13 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      if (e.key === "Escape") setTextMode(false);
+      if (e.key === "Escape") {
+        setTextMode(false);
+        setGroupMode(false);
+        setDraw(null);
+        drawStart.current = null;
+        drawRect.current = null;
+      }
       if (e.key === "Delete" || e.key === "Backspace") removeSelected();
     };
     window.addEventListener("paste", onPaste);
@@ -472,13 +561,24 @@ export default function App() {
     );
   };
 
+  // Screen coordinates -> board coordinates
+  const toBoard = (cx: number, cy: number) => {
+    const r = scroller.current!.getBoundingClientRect();
+    return {
+      x: (cx - r.left - panRef.current.x) / scaleRef.current,
+      y: (cy - r.top - panRef.current.y) / scaleRef.current,
+    };
+  };
+
   const startDrag = (
     e: PointerEvent<HTMLDivElement>,
     it: Item,
     mode: DragState["mode"],
   ) => {
-    // While a text node is being edited, let the textarea handle the pointer
-    if (editingText === it.id) {
+    // Group tool active: let the press bubble up so a frame can be drawn
+    if (groupMode) return;
+    // While a text/title is being edited, let the input handle the pointer
+    if (editingText === it.id || editingGroup === it.id) {
       e.stopPropagation();
       return;
     }
@@ -488,8 +588,17 @@ export default function App() {
     e.stopPropagation();
     e.currentTarget.setPointerCapture(e.pointerId);
     setSel(it.id);
-    const z = zTop.current++;
-    setItems((p) => p.map((i) => (i.id === it.id ? { ...i, z } : i)));
+    // Groups always stay behind the other items
+    if (it.type !== "group") {
+      const z = zTop.current++;
+      setItems((p) => p.map((i) => (i.id === it.id ? { ...i, z } : i)));
+    }
+    // Moving a group also moves everything fully inside its frame
+    let members: DragState["members"];
+    if (it.type === "group" && mode === "move") {
+      members = {};
+      for (const m of membersOf(it, items)) members[m.id] = { x: m.x, y: m.y };
+    }
     drag.current = {
       id: it.id,
       mode,
@@ -500,6 +609,7 @@ export default function App() {
       ow: it.w,
       oh: it.h,
       ofs: it.fs ?? 24,
+      members,
     };
   };
 
@@ -510,8 +620,19 @@ export default function App() {
     const dy = (e.clientY - d.sy) / scale;
     setItems((p) =>
       p.map((i) => {
-        if (i.id !== d.id) return i;
+        if (i.id !== d.id) {
+          const m = d.members?.[i.id];
+          return m ? { ...i, x: m.x + dx, y: m.y + dy } : i;
+        }
         if (d.mode === "move") return { ...i, x: d.ox + dx, y: d.oy + dy };
+        // groups resize freely (no aspect ratio, content is not scaled)
+        if (i.type === "group") {
+          return {
+            ...i,
+            w: Math.max(MIN_GROUP_W, d.ow + dx),
+            h: Math.max(MIN_GROUP_H, d.oh + dy),
+          };
+        }
         const w = Math.max(40, d.ow + dx);
         return {
           ...i,
@@ -532,6 +653,17 @@ export default function App() {
   };
 
   const startPan = (e: PointerEvent<HTMLDivElement>) => {
+    // Group tool: start drawing the frame
+    if (groupMode && e.button === 0) {
+      e.preventDefault();
+      e.currentTarget.setPointerCapture(e.pointerId);
+      const p = toBoard(e.clientX, e.clientY);
+      drawStart.current = p;
+      drawRect.current = { x: p.x, y: p.y, w: 0, h: 0 };
+      setDraw(drawRect.current);
+      setSel(null);
+      return;
+    }
     // Text tool: a click on empty canvas creates a text node and edits it
     if (
       textMode &&
@@ -575,17 +707,57 @@ export default function App() {
     panDrag.current = { sx: e.clientX, sy: e.clientY, ox: pan.x, oy: pan.y };
   };
   const movePan = (e: PointerEvent<HTMLDivElement>) => {
+    const s = drawStart.current;
+    if (s) {
+      const p = toBoard(e.clientX, e.clientY);
+      const r = {
+        x: Math.min(s.x, p.x),
+        y: Math.min(s.y, p.y),
+        w: Math.abs(p.x - s.x),
+        h: Math.abs(p.y - s.y),
+      };
+      drawRect.current = r;
+      setDraw(r);
+      return;
+    }
     const d = panDrag.current;
     if (!d) return;
     setPan({ x: d.ox + e.clientX - d.sx, y: d.oy + e.clientY - d.sy });
   };
   const endPan = () => {
     panDrag.current = null;
+    if (!drawStart.current) return;
+    const r = drawRect.current;
+    drawStart.current = null;
+    drawRect.current = null;
+    setDraw(null);
+    // ignore accidental clicks / tiny drags (the tool stays active)
+    if (!r || r.w < 24 || r.h < 24) return;
+    const id = crypto.randomUUID();
+    setItems((p) => [
+      ...p,
+      {
+        id,
+        src: "",
+        type: "group",
+        text: "Grupo",
+        x: r.x,
+        y: r.y,
+        w: Math.max(MIN_GROUP_W, r.w),
+        h: Math.max(MIN_GROUP_H, r.h),
+        z: 0,
+      },
+    ]);
+    setSel(id);
+    setEditingGroup(id); // type the title right away
+    setGroupMode(false);
+    setStatus("Salvando…");
   };
 
-  // ---- Text styling (font + color) ----
+  // ---- Text / group styling ----
   const selItem = items.find((i) => i.id === sel);
   const selIsText = selItem?.type === "text";
+  const selIsGroup = selItem?.type === "group";
 
   // Recompute the text height after a font change (the wrapping changes)
   const remeasure = (id: string, ff?: string) => {
@@ -623,7 +795,7 @@ export default function App() {
     if ("ff" in patch) remeasure(sel, patch.ff);
   };
 
-  // Render every image on the board into a single PNG and download it
+  // Render every item of the list into a single PNG and download it
   const exportPng = async (list: Item[], suffix = "") => {
     if (!list.length) return;
     setStatus("Exportando…");
@@ -641,16 +813,11 @@ export default function App() {
       canvas.width = Math.max(1, Math.round(bw * k));
       canvas.height = Math.max(1, Math.round(bh * k));
       const ctx = canvas.getContext("2d")!;
-      ctx.fillStyle =
-        getComputedStyle(document.documentElement)
-          .getPropertyValue("--board")
-          .trim() || "#fff";
+      ctx.fillStyle = themeVar("--board") || "#fff";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.imageSmoothingQuality = "high";
-      const ink =
-        getComputedStyle(document.documentElement)
-          .getPropertyValue("--ink")
-          .trim() || "#000";
+      const ink = themeVar("--ink") || "#000";
+      const accent = themeVar("--accent") || "#2f6fed";
       const wrapLines = (text: string, maxW: number) => {
         const out: string[] = [];
         for (const para of text.split("\n")) {
@@ -668,7 +835,50 @@ export default function App() {
         }
         return out;
       };
+      const roundRect = (
+        x: number,
+        y: number,
+        w: number,
+        h: number,
+        r: number,
+      ) => {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+      };
       for (const it of [...list].sort((a, b) => a.z - b.z)) {
+        if (it.type === "group") {
+          const c = it.color ?? accent;
+          const gx = (it.x - minX) * k;
+          const gy = (it.y - minY) * k;
+          const gw = it.w * k;
+          const gh = it.h * k;
+          ctx.save();
+          roundRect(gx, gy, gw, gh, 10 * k);
+          ctx.globalAlpha = 0.08;
+          ctx.fillStyle = c;
+          ctx.fill();
+          ctx.globalAlpha = 1;
+          ctx.strokeStyle = c;
+          ctx.lineWidth = 2 * k;
+          ctx.stroke();
+          const fam = fontCss();
+          try {
+            await document.fonts.load(`600 ${16 * k}px ${fam}`);
+          } catch {
+            /* ignore */
+          }
+          ctx.font = `600 ${16 * k}px ${fam}`;
+          ctx.fillStyle = c;
+          ctx.textBaseline = "bottom";
+          ctx.fillText(it.text || "Grupo", gx, gy - 10 * k, gw);
+          ctx.restore();
+          continue;
+        }
         if (it.type === "text") {
           const fs = (it.fs ?? 24) * k;
           const fam = fontCss(it.ff);
@@ -831,7 +1041,10 @@ export default function App() {
         </button>
         <button
           className={textMode ? "primary" : undefined}
-          onClick={() => setTextMode((m) => !m)}
+          onClick={() => {
+            setTextMode((m) => !m);
+            setGroupMode(false);
+          }}
           title="Adicionar texto"
           aria-label="Adicionar texto"
           aria-pressed={textMode}
@@ -840,37 +1053,62 @@ export default function App() {
           <Type size={ICON} />
           {textMode && "Clique no canvas…"}
         </button>
-        {selIsText && (
+        <button
+          className={groupMode ? "primary" : undefined}
+          onClick={() => {
+            setGroupMode((m) => !m);
+            setTextMode(false);
+          }}
+          title="Criar grupo (desenhe um quadro ao redor dos itens)"
+          aria-label="Criar grupo"
+          aria-pressed={groupMode}
+          style={iconBtn}
+        >
+          <Frame size={ICON} />
+          {groupMode && "Desenhe o quadro…"}
+        </button>
+        {(selIsText || selIsGroup) && (
           <>
-            <select
-              aria-label="Fonte do texto"
-              value={selItem?.ff ?? "sans"}
-              onChange={(e) => updateSelected({ ff: e.target.value })}
-              style={{
-                font: "inherit",
-                color: "var(--ink)",
-                background: "var(--board)",
-                border: "1px solid var(--line)",
-                borderRadius: 6,
-                padding: "6px 8px",
-              }}
-            >
-              {Object.entries(FONTS).map(([k, f]) => (
-                <option key={k} value={k}>
-                  {f.label}
-                </option>
-              ))}
-            </select>
+            {selIsText && (
+              <select
+                aria-label="Fonte do texto"
+                value={selItem?.ff ?? "sans"}
+                onChange={(e) => updateSelected({ ff: e.target.value })}
+                style={{
+                  font: "inherit",
+                  color: "var(--ink)",
+                  background: "var(--board)",
+                  border: "1px solid var(--line)",
+                  borderRadius: 6,
+                  padding: "6px 8px",
+                }}
+              >
+                {Object.entries(FONTS).map(([k, f]) => (
+                  <option key={k} value={k}>
+                    {f.label}
+                  </option>
+                ))}
+              </select>
+            )}
+            {selIsGroup && sel && (
+              <button
+                onClick={() => setEditingGroup(sel)}
+                title="Renomear grupo"
+                aria-label="Renomear grupo"
+                style={iconBtn}
+              >
+                <Pencil size={ICON} />
+              </button>
+            )}
             <input
               type="color"
-              aria-label="Cor do texto"
-              title="Cor do texto"
+              aria-label={selIsGroup ? "Cor do grupo" : "Cor do texto"}
+              title={selIsGroup ? "Cor do grupo" : "Cor do texto"}
               value={
                 selItem?.color ??
-                (getComputedStyle(document.documentElement)
-                  .getPropertyValue("--ink")
-                  .trim() ||
-                  "#000000")
+                (selIsGroup
+                  ? themeVar("--accent") || "#2f6fed"
+                  : themeVar("--ink") || "#000000")
               }
               onChange={(e) => updateSelected({ color: e.target.value })}
               style={{ width: 36, height: 32, padding: 2, cursor: "pointer" }}
@@ -909,7 +1147,12 @@ export default function App() {
             <button
               onClick={() => {
                 const it = items.find((i) => i.id === sel);
-                if (it) exportPng([it], "-selecionado");
+                if (!it) return;
+                // a group is exported together with everything inside it
+                exportPng(
+                  it.type === "group" ? [it, ...membersOf(it, items)] : [it],
+                  "-selecionado",
+                );
               }}
               title="Exportar selecionado"
               aria-label="Exportar selecionado"
@@ -919,8 +1162,12 @@ export default function App() {
             </button>
             <button
               onClick={removeSelected}
-              title="Excluir selecionado"
-              aria-label="Excluir selecionado"
+              title={
+                selIsGroup
+                  ? "Desfazer grupo (os itens ficam no quadro)"
+                  : "Excluir selecionado"
+              }
+              aria-label={selIsGroup ? "Desfazer grupo" : "Excluir selecionado"}
               style={iconBtn}
             >
               <Trash2 size={ICON} />
@@ -980,7 +1227,46 @@ export default function App() {
               {boards.map((b) => (
                 <li
                   key={b.id}
-                  className={"row" + (b.id === lib?.current ? " active" : "")}
+                  className={
+                    "row" +
+                    (b.id === lib?.current ? " active" : "") +
+                    (dragBoard === b.id ? " dragging" : "") +
+                    (dropMark?.id === b.id
+                      ? dropMark.after
+                        ? " drop-after"
+                        : " drop-before"
+                      : "")
+                  }
+                  draggable={editing !== b.id}
+                  onDragStart={(e) => {
+                    e.dataTransfer.effectAllowed = "move";
+                    e.dataTransfer.setData("text/plain", b.id); // required by Firefox
+                    setDragBoard(b.id);
+                  }}
+                  onDragOver={(e) => {
+                    if (!dragBoard) return; // ignore file drags
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "move";
+                    const r = e.currentTarget.getBoundingClientRect();
+                    const after = e.clientY > r.top + r.height / 2;
+                    setDropMark((m) =>
+                      m && m.id === b.id && m.after === after
+                        ? m
+                        : { id: b.id, after },
+                    );
+                  }}
+                  onDrop={(e) => {
+                    if (!dragBoard) return;
+                    e.preventDefault();
+                    const r = e.currentTarget.getBoundingClientRect();
+                    reorderBoards(
+                      dragBoard,
+                      b.id,
+                      e.clientY > r.top + r.height / 2,
+                    );
+                    endBoardDrag();
+                  }}
+                  onDragEnd={endBoardDrag}
                 >
                   {editing === b.id ? (
                     <input
@@ -1059,7 +1345,7 @@ export default function App() {
           style={{
             backgroundPosition: `${pan.x}px ${pan.y}px`,
             backgroundSize: `${28 * scale}px ${28 * scale}px`,
-            cursor: textMode ? "crosshair" : "default",
+            cursor: textMode || groupMode ? "crosshair" : "default",
           }}
           onDragOver={(e) => {
             e.preventDefault();
@@ -1093,113 +1379,214 @@ export default function App() {
               transformOrigin: "0 0",
             }}
           >
-            {items.map((it) => (
-              <div
-                key={it.id}
-                data-id={it.id}
-                className={"item" + (sel === it.id ? " sel" : "")}
-                style={{
-                  left: it.x,
-                  top: it.y,
-                  width: it.w,
-                  height: it.h,
-                  zIndex: it.z,
-                }}
-                onDoubleClick={() => {
-                  if (it.type === "text") setEditingText(it.id);
-                }}
-                onPointerDown={(e) => startDrag(e, it, "move")}
-                onPointerMove={moveDrag}
-                onPointerUp={endDrag}
-              >
-                {it.type === "text" ? (
-                  editingText === it.id ? (
-                    <textarea
-                      ref={textRef}
-                      value={it.text ?? ""}
-                      onChange={(e) => {
-                        const ta = e.currentTarget;
-                        const value = ta.value;
-                        // measure the content height so the node grows with the text
-                        ta.style.height = "auto";
-                        const h = ta.scrollHeight;
-                        ta.style.height = "";
-                        setItems((p) =>
-                          p.map((i) =>
-                            i.id === it.id
-                              ? {
-                                  ...i,
-                                  text: value,
-                                  h: Math.max(
-                                    Math.round((i.fs ?? 24) * 1.3),
-                                    h,
-                                  ),
-                                }
-                              : i,
-                          ),
-                        );
-                        setStatus("Salvando…");
-                      }}
-                      onBlur={(e) => {
-                        const empty = !e.currentTarget.value.trim();
-                        setEditingText(null);
-                        if (empty) {
-                          setItems((p) => p.filter((i) => i.id !== it.id));
-                          setSel((s) => (s === it.id ? null : s));
-                        }
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Escape") e.currentTarget.blur();
-                      }}
-                      style={{
-                        display: "block",
-                        width: "100%",
-                        height: "100%",
-                        boxSizing: "border-box",
-                        margin: 0,
-                        padding: 0,
-                        border: "none",
-                        outline: "none",
-                        resize: "none",
-                        overflow: "hidden",
-                        background: "transparent",
-                        color: it.color ?? "var(--ink)",
-                        fontFamily: fontCss(it.ff),
-                        fontSize: it.fs ?? 24,
-                        lineHeight: 1.3,
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-word",
-                        cursor: "text",
-                        userSelect: "text",
-                      }}
-                    />
-                  ) : (
-                    <div
-                      style={{
-                        width: "100%",
-                        height: "100%",
-                        color: it.color ?? "var(--ink)",
-                        fontFamily: fontCss(it.ff),
-                        fontSize: it.fs ?? 24,
-                        lineHeight: 1.3,
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-word",
-                      }}
-                    >
-                      {it.text}
-                    </div>
-                  )
-                ) : (
-                  <img src={it.src} alt="" draggable={false} />
-                )}
+            {items.map((it) => {
+              const isGroup = it.type === "group";
+              const gc = it.color ?? "var(--accent)";
+              return (
                 <div
-                  className="handle"
-                  onPointerDown={(e) => startDrag(e, it, "resize")}
+                  key={it.id}
+                  data-id={it.id}
+                  className={"item" + (sel === it.id ? " sel" : "")}
+                  style={{
+                    left: it.x,
+                    top: it.y,
+                    width: it.w,
+                    height: it.h,
+                    // groups sit behind every other item
+                    zIndex: isGroup ? 0 : it.z,
+                  }}
+                  onDoubleClick={() => {
+                    if (it.type === "text") setEditingText(it.id);
+                    if (isGroup) setEditingGroup(it.id);
+                  }}
+                  onPointerDown={(e) => startDrag(e, it, "move")}
                   onPointerMove={moveDrag}
                   onPointerUp={endDrag}
-                />
-              </div>
-            ))}
+                >
+                  {isGroup ? (
+                    <>
+                      <div
+                        style={{
+                          width: "100%",
+                          height: "100%",
+                          boxSizing: "border-box",
+                          border: `2px solid ${gc}`,
+                          borderRadius: 10,
+                          background: `color-mix(in srgb, ${gc} 8%, transparent)`,
+                        }}
+                      />
+                      <div
+                        style={{
+                          position: "absolute",
+                          left: 0,
+                          top: -32,
+                          width: "100%",
+                          height: 28,
+                        }}
+                      >
+                        {editingGroup === it.id ? (
+                          <input
+                            ref={groupRef}
+                            value={it.text ?? ""}
+                            placeholder="Título do grupo"
+                            maxLength={120}
+                            onChange={(e) => {
+                              const value = e.target.value;
+                              setItems((p) =>
+                                p.map((i) =>
+                                  i.id === it.id ? { ...i, text: value } : i,
+                                ),
+                              );
+                              setStatus("Salvando…");
+                            }}
+                            onBlur={() => setEditingGroup(null)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === "Escape")
+                                e.currentTarget.blur();
+                            }}
+                            style={{
+                              display: "block",
+                              width: "100%",
+                              height: "100%",
+                              boxSizing: "border-box",
+                              margin: 0,
+                              padding: 0,
+                              border: "none",
+                              outline: "none",
+                              background: "transparent",
+                              color: gc,
+                              fontFamily: fontCss(),
+                              fontSize: 16,
+                              fontWeight: 600,
+                              userSelect: "text",
+                            }}
+                          />
+                        ) : (
+                          <div
+                            style={{
+                              width: "100%",
+                              color: gc,
+                              fontFamily: fontCss(),
+                              fontSize: 16,
+                              fontWeight: 600,
+                              lineHeight: "28px",
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {it.text || "Grupo"}
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  ) : it.type === "text" ? (
+                    editingText === it.id ? (
+                      <textarea
+                        ref={textRef}
+                        value={it.text ?? ""}
+                        onChange={(e) => {
+                          const ta = e.currentTarget;
+                          const value = ta.value;
+                          // measure the content height so the node grows with the text
+                          ta.style.height = "auto";
+                          const h = ta.scrollHeight;
+                          ta.style.height = "";
+                          setItems((p) =>
+                            p.map((i) =>
+                              i.id === it.id
+                                ? {
+                                    ...i,
+                                    text: value,
+                                    h: Math.max(
+                                      Math.round((i.fs ?? 24) * 1.3),
+                                      h,
+                                    ),
+                                  }
+                                : i,
+                            ),
+                          );
+                          setStatus("Salvando…");
+                        }}
+                        onBlur={(e) => {
+                          const empty = !e.currentTarget.value.trim();
+                          setEditingText(null);
+                          if (empty) {
+                            setItems((p) => p.filter((i) => i.id !== it.id));
+                            setSel((s) => (s === it.id ? null : s));
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") e.currentTarget.blur();
+                        }}
+                        style={{
+                          display: "block",
+                          width: "100%",
+                          height: "100%",
+                          boxSizing: "border-box",
+                          margin: 0,
+                          padding: 0,
+                          border: "none",
+                          outline: "none",
+                          resize: "none",
+                          overflow: "hidden",
+                          background: "transparent",
+                          color: it.color ?? "var(--ink)",
+                          fontFamily: fontCss(it.ff),
+                          fontSize: it.fs ?? 24,
+                          lineHeight: 1.3,
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-word",
+                          cursor: "text",
+                          userSelect: "text",
+                        }}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          width: "100%",
+                          height: "100%",
+                          color: it.color ?? "var(--ink)",
+                          fontFamily: fontCss(it.ff),
+                          fontSize: it.fs ?? 24,
+                          lineHeight: 1.3,
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {it.text}
+                      </div>
+                    )
+                  ) : (
+                    <img src={it.src} alt="" draggable={false} />
+                  )}
+                  <div
+                    className="handle"
+                    onPointerDown={(e) => startDrag(e, it, "resize")}
+                    onPointerMove={moveDrag}
+                    onPointerUp={endDrag}
+                  />
+                </div>
+              );
+            })}
+            {draw && (
+              <div
+                style={{
+                  position: "absolute",
+                  left: draw.x,
+                  top: draw.y,
+                  width: draw.w,
+                  height: draw.h,
+                  boxSizing: "border-box",
+                  border: "2px dashed var(--accent)",
+                  borderRadius: 10,
+                  background:
+                    "color-mix(in srgb, var(--accent) 8%, transparent)",
+                  pointerEvents: "none",
+                  zIndex: 100000,
+                }}
+              />
+            )}
           </div>
         </div>
       </div>
