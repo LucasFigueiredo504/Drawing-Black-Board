@@ -272,6 +272,7 @@ export default function App() {
   const zTop = useRef(1);
   const textRef = useRef<HTMLTextAreaElement>(null);
   const groupRef = useRef<HTMLInputElement>(null);
+  const copiedItem = useRef<Item | null>(null);
 
   const boards = lib?.boards ?? [];
   const current = boards.find((b) => b.id === lib?.current);
@@ -524,15 +525,48 @@ export default function App() {
     setStatus("Salvando…");
   }, [sel]);
 
-  // Paste images + Delete key
+  // Copy/paste selected nodes, paste images + Delete key
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       const files = e.clipboardData?.files;
       if (files && files.length) addFiles(files);
     };
     const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      const target = e.target as HTMLElement;
+      const tag = target.tagName;
+      if (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        target.isContentEditable
+      )
+        return;
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key.toLowerCase() === "c" && sel) {
+          const selected = items.find((item) => item.id === sel);
+          if (selected) {
+            copiedItem.current = { ...selected };
+            e.preventDefault();
+          }
+          return;
+        }
+        if (e.key.toLowerCase() === "v" && copiedItem.current) {
+          e.preventDefault();
+          const copy = copiedItem.current;
+          const id = crypto.randomUUID();
+          const duplicate: Item = {
+            ...copy,
+            id,
+            x: copy.x + 20,
+            y: copy.y + 20,
+            z: copy.type === "group" ? 0 : zTop.current++,
+          };
+          setItems((previous) => [...previous, duplicate]);
+          setSel(id);
+          setStatus("Salvando…");
+          return;
+        }
+      }
       if (e.key === "Escape") {
         setTextMode(false);
         setGroupMode(false);
@@ -548,7 +582,7 @@ export default function App() {
       window.removeEventListener("paste", onPaste);
       window.removeEventListener("keydown", onKey);
     };
-  }, [addFiles, removeSelected]);
+  }, [addFiles, items, removeSelected, sel]);
 
   const onDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
